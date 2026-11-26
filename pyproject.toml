@@ -1,0 +1,57 @@
+[project]
+name = "industrial-agent"
+version = "0.1.0"
+description = "工业多智能体系统：LangChain 能力底座 + LangGraph 编排 + 受控工业工具层"
+readme = "docs/工业多智能体系统完整方案.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "langchain>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langgraph>=0.2.60",
+    "langchain-openai>=0.2.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "python-dotenv>=1.0.1",
+    "httpx>=0.27.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.7.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[[tool.uv.index]]
+name = "tsinghua"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[[tool.uv.index]]
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple/"
+
+[tool.uv]
+index-strategy = "first-index"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/industrial_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["B008"]

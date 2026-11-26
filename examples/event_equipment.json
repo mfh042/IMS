@@ -1,0 +1,16 @@
+{
+  "event_id": "evt-20261126-000123",
+  "event_type": "eam.device.temperature_high",
+  "source_system": "EAM",
+  "occurred_at": "2026-11-26T10:20:00+08:00",
+  "severity": "high",
+  "tenant_id": "factory_a",
+  "trace_id": "trace-demo-equipment",
+  "payload": {
+    "device_id": "DEVICE-A-001",
+    "line_id": "LINE-03",
+    "work_order_id": "WO20261126001",
+    "alarm_code": "TEMP_HIGH",
+    "message": "主轴温度超过阈值 75℃"
+  }
+}

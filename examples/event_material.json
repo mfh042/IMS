@@ -1,0 +1,17 @@
+{
+  "event_id": "evt-20261126-000456",
+  "event_type": "mes.work_order.blocked",
+  "source_system": "MES",
+  "occurred_at": "2026-11-26T10:30:00+08:00",
+  "severity": "high",
+  "tenant_id": "factory_a",
+  "trace_id": "trace-demo-material",
+  "payload": {
+    "work_order_id": "WO20261126001",
+    "line_id": "LINE-03",
+    "process_id": "OP-20",
+    "material_id": "M-10023",
+    "batch_id": "B20261126-08",
+    "message": "工序阻塞，疑似缺料"
+  }
+}
