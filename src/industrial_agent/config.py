@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -8,6 +9,35 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 RolloutMode = Literal["shadow", "low_auto", "medium_auto", "high_controlled"]
+
+
+@dataclass(frozen=True)
+class RolloutPolicy:
+    """阶段 10.3 / 10.4 灰度策略：写开关、中风险自动、高风险受控。"""
+
+    allow_write: bool
+    allow_medium_auto: bool
+    allow_high_confirm: bool
+
+
+ROLLOUT_POLICY: dict[str, RolloutPolicy] = {
+    # 阶段 A 影子模式：生成方案但不执行任何写操作
+    "shadow": RolloutPolicy(allow_write=False, allow_medium_auto=False, allow_high_confirm=False),
+    # 阶段 B 低风险自动：开放查询、诊断记录、工单草稿、通知
+    "low_auto": RolloutPolicy(allow_write=True, allow_medium_auto=False, allow_high_confirm=False),
+    # 阶段 C 中风险闭环：待办确认流上线
+    "medium_auto": RolloutPolicy(allow_write=True, allow_medium_auto=True, allow_high_confirm=False),
+    # 阶段 D 高风险受控：审批后方可执行
+    "high_controlled": RolloutPolicy(
+        allow_write=True, allow_medium_auto=True, allow_high_confirm=True
+    ),
+}
+
+
+def rollout_policy(mode: str) -> RolloutPolicy:
+    """未知模式一律按最保守的影子模式处理。"""
+
+    return ROLLOUT_POLICY.get(mode, ROLLOUT_POLICY["shadow"])
 
 
 class Settings(BaseSettings):
@@ -30,6 +60,8 @@ class Settings(BaseSettings):
 
     rollout_mode: RolloutMode = "shadow"
     knowledge_strict_metadata: bool = True
+    # 阶段 12.5：first 收敛到最小可用范围（B3/A3/B4 + A1/B1 只读取证）；all 放开全量路由
+    agent_release_scope: str = "first"
 
     audit_dir: Path = Path("var/audit")
     knowledge_path: Path = Path("var/knowledge")
