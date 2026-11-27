@@ -47,7 +47,7 @@ def _tokens(text: str) -> set[str]:
 class KnowledgeStore:
     """知识分块的内存存储与检索器。
 
-    加载方式（构造时一次性加载，之后只读检索）：
+    加载方式（构造时加载；运行期可通过 reload() 热更新外部文件，无需重启）：
     - chunks：调用方显式传入的分块列表（如 build_seed_knowledge() 的内置种子）；
     - path：JSON 文件或目录；目录会递归加载所有 *.json，文件加载单个。
       JSON 兼容两种格式：[...] 列表 或 {"chunks": [...]} 包裹。
@@ -56,10 +56,10 @@ class KnowledgeStore:
     """
 
     def __init__(self, chunks: list[KnowledgeChunk] | None = None, *, path: Path | None = None) -> None:
-        self._chunks: list[KnowledgeChunk] = list(chunks or [])  # 内存分块列表（检索的数据源）
-        self._path = path                                          # 记录加载路径（调试/溯源用）
-        if path is not None and path.exists():
-            self._chunks.extend(self._load_json(path))  # 路径存在才加载，避免启动因缺目录报错
+        self._seed_chunks: list[KnowledgeChunk] = list(chunks or [])  # 显式注入分块（reload 时保留）
+        self._path = path                                              # 记录加载路径（调试/溯源 + 热更新扫描用）
+        self._chunks: list[KnowledgeChunk] = []                        # 内存分块列表（检索的数据源）
+        self.reload()                                                  # 初始加载：种子 + path 下的外部知识
 
     def _load_json(self, path: Path) -> list[KnowledgeChunk]:
         """加载 JSON 知识分块（递归支持目录，兼容列表/包裹两种格式）。
@@ -76,6 +76,18 @@ class KnowledgeStore:
         # 兼容顶层是 list，或 {"chunks": [...]} 包裹两种形态
         rows = raw if isinstance(raw, list) else raw.get("chunks", [])
         return [KnowledgeChunk.model_validate(row) for row in rows]
+
+    def reload(self) -> int:
+        """重新从 path 加载外部知识分块（热更新），保留显式注入的种子分块。
+
+        适用于外部知识文件在运行期被更新后无需重启服务即可生效：调用方更新
+        var/knowledge/*.json 后调一次 reload() 即可。返回重新加载后的总分块数。
+        """
+        loaded: list[KnowledgeChunk] = []
+        if self._path is not None and self._path.exists():
+            loaded = self._load_json(self._path)
+        self._chunks = list(self._seed_chunks) + loaded
+        return len(self._chunks)
 
     def add(self, chunk: KnowledgeChunk) -> None:
         """追加一条分块（运行时增量注入；按 chunk_id 去重需调用方自行保证）。"""

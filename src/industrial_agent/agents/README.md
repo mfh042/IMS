@@ -14,7 +14,7 @@
 
 | 文件 | 作用 | 类比 |
 |------|------|------|
-| [`__init__.py`](./__init__.py) | 包入口：re-export 所有公开类与函数，并提供旧版 `AGENT_REGISTRY` 兼容映射 | 团队花名册 |
+| [`__init__.py`](./__init__.py) | 包入口：re-export 所有公开类与函数（catalog 编号体系 + `factory.build_agent` 装配），不再保留旧版按 name 调度的兼容映射 | 团队花名册 |
 | [`base.py`](./base.py) | `AgentContext`（智能体运行时共享上下文）+ `BaseAgent`（所有子智能体的基类，封装审计、工具调用、LLM 降级） | 员工手册 + 工牌模板 |
 | [`catalog.py`](./catalog.py) | **13 类智能体的唯一事实来源**：规格（编号/名称/工具/输入输出/风险上限…）、incident_type 路由、行业注入映射、知识库归属、第一版收敛范围 | 组织架构图 + 排班表 |
 | [`factory.py`](./factory.py) | `build_agent(code)`：按 catalog 编号把规格装配成可运行的 Agent 实例；C1–C3 走行业规则注入，未知编号回落到 B3 | 人事派工 |

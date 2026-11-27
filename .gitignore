@@ -8,3 +8,6 @@ var/
 *.egg-info/
 dist/
 build/
+# 前端依赖与构建产物（由 npm 管理，不应入库）
+node_modules/
+frontend/dist/

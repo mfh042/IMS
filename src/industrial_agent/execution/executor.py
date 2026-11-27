@@ -17,8 +17,11 @@ execute_medium_risk_actions / request_human_confirm）的调用，负责把规�
 
 from __future__ import annotations
 
+import json
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from industrial_agent.audit.recorder import AuditRecorder
 from industrial_agent.models.execution import ActionExecution, ConfirmRequest
@@ -31,19 +34,55 @@ class ConfirmStore:
     """人工确认请求存储；超时置 expired，严禁默认同意。
 
     设计要点：
-    - 内存存储（dict），ConfirmRequest 的完整生命周期 pending → approved / rejected / expired
-      都在这里流转；
+    - 内存存储（dict）为主，ConfirmRequest 的完整生命周期 pending → approved / rejected / expired
+      都在这里流转；配置 storage_path 时同步落盘 JSON，进程重启后仍可恢复待确认项，避免"挂起
+      的确认请求因服务重启丢失、前端轮询不到"；
     - TTL（默认 3600s）：超时自动置 expired，避免"挂起的确认请求被无限期持有后被误批准"；
     - 角色校验：批准人必须具备动作要求的全部角色（RBAC 最小化授权），缺一不可；
     - 安全默认：decide() 返回 (ok, status)，ok=False 表示确认无效（不存在/已决策/超时/缺角色），
       调用方据此拒绝执行，绝不存在"默认同意"的分支。
     """
 
-    def __init__(self, ttl_seconds: int = 3600) -> None:
+    def __init__(
+        self,
+        ttl_seconds: int = 3600,
+        *,
+        storage_path: Path | None = None,
+    ) -> None:
         # confirm_id → ConfirmRequest，所有待处理/已处理的确认请求都在这
         self._requests: dict[str, ConfirmRequest] = {}
         # 确认请求的存活时长，超过 expire_at 即视为过期
         self._ttl = timedelta(seconds=ttl_seconds)
+        # 持久化文件（JSON）：None 表示纯内存模式；落盘保证重启不丢待确认项
+        self._storage_path = storage_path
+        # 读写锁：create/decide/expire 会并发访问（主图线程 + 前端轮询/回调线程），保证落盘一致
+        self._lock = threading.Lock()
+        self._load_from_disk()
+
+    def _load_from_disk(self) -> None:
+        """启动时从 JSON 文件恢复确认请求（仅在配置了 storage_path 且文件存在时）。"""
+        if self._storage_path is None or not self._storage_path.exists():
+            return
+        try:
+            raw = json.loads(self._storage_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return  # 文件损坏/不可读时退化为空库，不阻断启动
+        for row in raw:
+            try:
+                request = ConfirmRequest.model_validate(row)
+            except Exception:  # noqa: BLE001 —— 单条损坏跳过，不影响其余恢复
+                continue
+            self._requests[request.confirm_id] = request
+
+    def _persist(self) -> None:
+        """把当前所有确认请求原子写入 storage_path（写临时文件后 replace，避免半写损坏）。"""
+        if self._storage_path is None:
+            return
+        self._storage_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = [r.model_dump(mode="json") for r in self._requests.values()]
+        tmp = self._storage_path.with_suffix(self._storage_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self._storage_path)
 
     def create(
         self,
@@ -77,7 +116,9 @@ class ConfirmStore:
             expire_at=now + self._ttl,
             status="pending",
         )
-        self._requests[request.confirm_id] = request
+        with self._lock:
+            self._requests[request.confirm_id] = request
+            self._persist()
         return request
 
     def get(self, confirm_id: str) -> ConfirmRequest | None:
@@ -95,10 +136,13 @@ class ConfirmStore:
         """
         now = now or datetime.now(UTC)
         expired: list[ConfirmRequest] = []
-        for request in self._requests.values():
-            if request.status == "pending" and now >= request.expire_at:
-                request.status = "expired"
-                expired.append(request)
+        with self._lock:
+            for request in self._requests.values():
+                if request.status == "pending" and now >= request.expire_at:
+                    request.status = "expired"
+                    expired.append(request)
+            if expired:
+                self._persist()
         return expired
 
     def decide(
@@ -128,7 +172,9 @@ class ConfirmStore:
             return False, f"确认请求状态为 {request.status}，不可再次决策"
         now = now or datetime.now(UTC)
         if now >= request.expire_at:
-            request.status = "expired"
+            with self._lock:
+                request.status = "expired"
+                self._persist()
             return False, "确认请求已超时，需重新发起"
 
         # 角色校验：required_roles 是动作要求的批准角色，批准人的 roles 必须全部覆盖
@@ -136,10 +182,12 @@ class ConfirmStore:
         if missing:
             return False, f"缺少确认角色：{','.join(missing)}"
 
-        request.status = "approved" if approved else "rejected"
-        request.decision_by = decision_by
-        request.decision_at = now
-        request.decision_note = note
+        with self._lock:
+            request.status = "approved" if approved else "rejected"
+            request.decision_by = decision_by
+            request.decision_at = now
+            request.decision_note = note
+            self._persist()
         return True, request.status
 
 

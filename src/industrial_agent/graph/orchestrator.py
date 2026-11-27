@@ -75,6 +75,8 @@ flowchart TD
 from __future__ import annotations
 
 # ---------- 标准库 ----------
+import sqlite3  # 持久化检查点：SQLite 连接
+import warnings  # 降级到内存检查点时发警告
 from concurrent.futures import ThreadPoolExecutor  # 并行跑多个子智能体
 from datetime import UTC, datetime  # 审计时间戳
 from typing import Any
@@ -105,7 +107,10 @@ from industrial_agent.execution.executor import ActionExecutor, ConfirmStore  # 
 from industrial_agent.governance.governor import EventGovernance  # 去重/聚合/限流/优先级
 from industrial_agent.graph.state import IndustrialAgentState  # 22 字段状态契约，节点间靠它传数据
 from industrial_agent.ingestion.normalizer import EventNormalizer  # 异构报文 → 标准事件
-from industrial_agent.knowledge.store import KnowledgeStore  # 知识库检索
+from industrial_agent.knowledge.store import (  # 知识库检索 + 内置种子（无外部库时回退）
+    KnowledgeStore,
+    build_seed_knowledge,
+)
 
 # ---------- 数据模型 ----------
 from industrial_agent.models.events import Incident, StandardEvent
@@ -117,6 +122,19 @@ from industrial_agent.planning.builder import PlanBuilder, PlanValidator  # 方�
 from industrial_agent.tools.contracts import ToolContext  # 工具调用上下文（含 allow_write 开关）
 from industrial_agent.tools.factory import build_default_registry  # 装配 17 个默认工具
 from industrial_agent.tools.registry import ToolRegistry  # 工具唯一入口 + 九步检查链
+
+
+def _default_knowledge_store(settings: Settings) -> KnowledgeStore:
+    """按配置构造默认知识库：knowledge_path 下有 JSON 则加载外部库，否则回退内置种子。
+
+    保证主图默认非空——无外部知识时也能用 7 条种子跑通检索/打分/元数据校验全链路。
+    """
+    path = settings.knowledge_path
+    has_external = path.exists() and any(path.glob("*.json"))
+    if has_external:
+        return KnowledgeStore(path=path)
+    return KnowledgeStore(chunks=build_seed_knowledge(), path=path)
+
 
 # 事件类型关键词映射：当报文正文命中这些关键词时，用于辅助判定 / 修正 incident_type。
 # 命中多个不同类型的关键词 → 升级为 mixed_exception（混合异常）。
@@ -156,8 +174,8 @@ class IndustrialAgentGraph:
         self._audit = audit or AuditRecorder(audit_dir=self._settings.audit_dir)
         # 工具注册表：17 个默认工具的唯一入口，内部带九步前置检查链
         self._tools = tools or build_default_registry(registry=ToolRegistry(self._audit))
-        # 知识库：启动加载 var/knowledge，目录空则回退内置种子知识
-        self._knowledge = knowledge or KnowledgeStore()
+        # 知识库：启动加载 var/knowledge，目录空则回退内置种子知识（保证默认非空）
+        self._knowledge = knowledge or _default_knowledge_store(self._settings)
         # 事件治理：去重窗口 / 并发上限 / 单实体上限 / 优先级等待权重，全来自配置
         self._governance = governance or EventGovernance(
             dedup_window_seconds=self._settings.dedup_window_seconds,
@@ -172,12 +190,14 @@ class IndustrialAgentGraph:
         # 规划：PlanBuilder 汇总多智能体结论生成方案；PlanValidator 校验并修正可执行性/置信度
         self._plan_builder = PlanBuilder()
         self._plan_validator = PlanValidator()
-        # 人工确认存储：TTL 默认 3600s，超时置 expired 且严禁默认同意
-        self._confirm_store = ConfirmStore(confirm_ttl_seconds)
+        # 人工确认存储：TTL 默认 3600s，超时置 expired 且严禁默认同意；落盘 JSON 跨进程恢复
+        self._confirm_store = ConfirmStore(
+            confirm_ttl_seconds, storage_path=self._settings.confirm_store_path
+        )
         # 动作执行器：三分桶（auto/todo/confirm）+ 调工具执行 + 失败回滚 + 写审计
         self._executor = ActionExecutor(self._tools, audit=self._audit, confirms=self._confirm_store)
-        # LangGraph 内存检查点：让图支持 interrupt() 挂起，等待外部 resume 恢复
-        self._checkpointer = InMemorySaver()
+        # LangGraph 检查点：优先 SQLite 持久化（interrupt 挂起状态跨进程可恢复），失败回退内存
+        self._checkpointer = self._build_checkpointer()
         # 构建并编译 14 节点 StateGraph（见 _build）
         self._graph = self._build()
 
@@ -228,6 +248,39 @@ class IndustrialAgentGraph:
             {"id": "record_result", "name": "记录审计结果", "phase": "收尾"},
             {"id": "respond", "name": "生成最终结论", "phase": "收尾"},
         ]
+
+    # ---------- 检查点 / 热更新 ----------
+
+    def _build_checkpointer(self) -> Any:
+        """构造 LangGraph 检查点存储：优先 SQLite 持久化，缺失依赖时降级内存并告警。
+
+        SQLite 持久化让 interrupt() 挂起的线程状态在服务重启后仍可通过 resume 恢复，
+        是"人工确认中断可恢复"的关键；依赖 langgraph-checkpoint-sqlite（见 pyproject）。
+        """
+        db_path = self._settings.checkpoint_db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            from langgraph.checkpoint.sqlite import SqliteSaver
+        except ImportError:
+            warnings.warn(
+                "未安装 langgraph-checkpoint-sqlite，检查点降级为内存模式，"
+                "进程重启后中断挂起状态将丢失。",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return InMemorySaver()
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        checkpointer = SqliteSaver(conn)
+        checkpointer.setup()  # 建表（幂等），保证首次启动即可写入
+        return checkpointer
+
+    def reload_knowledge(self) -> int:
+        """热更新知识库：重新扫描 knowledge_path 加载外部文件，返回当前总分块数。
+
+        供运维在更新 var/knowledge/*.json 后调用（或经 API /api/knowledge/reload），
+        无需重启服务即可让新知识生效。
+        """
+        return self._knowledge.reload()
 
     # ---------- 图构建 ----------
 

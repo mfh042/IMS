@@ -65,6 +65,13 @@ class Settings(BaseSettings):
 
     audit_dir: Path = Path("var/audit")
     knowledge_path: Path = Path("var/knowledge")
+    # 持久化：主图检查点 SQLite（interrupt 挂起状态跨进程可恢复）+ 人工确认请求 JSON（重启不丢待确认项）
+    checkpoint_db_path: Path = Path("var/checkpoints/checkpoints.db")
+    confirm_store_path: Path = Path("var/confirms/confirms.json")
+
+    # API 鉴权：默认开启；api_keys 为空时所有受保护路径返回 401，/api/health 等探活路径豁免
+    api_auth_enabled: bool = True
+    api_keys: list[str] = Field(default_factory=list)
 
     llm_enabled: bool = False
     llm_model: str = "gpt-4o-mini"
@@ -75,6 +82,8 @@ class Settings(BaseSettings):
     def ensure_dirs(self) -> None:
         self.audit_dir.mkdir(parents=True, exist_ok=True)
         self.knowledge_path.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.confirm_store_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)
